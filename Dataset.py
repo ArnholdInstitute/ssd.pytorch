@@ -20,15 +20,26 @@ def raster_to_proj(ds, x, y):
     projy = gm[3] + gm[4] * x + gm[5] * y
     return projx, projy
 
-class Dataset(data.Dataset):
+class SatelliteDataset(data.Dataset):
     def __init__(self, root_dir, transform = lambda x, y: (x, y)):
         self.root_dir = root_dir   
-        self.img_files = glob.glob(os.path.join(root_dir, '3band/*.tif'))
+        self.img_files = glob.glob(os.path.join(root_dir, '3band/*'))
         self.transform = transform
-        self.name = 'Spacenet'
 
     def __len__(self):
         return len(self.img_files)
+
+    def expand(self, N):
+        """
+        Pad this dataset to have N elements
+        """
+        delta = N - len(self.img_files)
+        to_add = []
+        while delta > len(self.img_files):
+            to_add.extend(self.img_files)
+            delta -= len(self.img_files)
+        to_add.extend(self.img_files[:delta])
+        self.img_files.extend(to_add)
 
     def __getitem__(self, idx):
         img_file = self.img_files[idx]
@@ -39,17 +50,12 @@ class Dataset(data.Dataset):
         if len(vdata['features']) == 0:
             return self[random.randint(0, len(self) - 1)]
 
-        ds = gdal.Open(img_file)
-
         img_data = cv2.imread(img_file)
-
         boxes = []
-
         for feature in vdata['features']:
             geom = shape(feature['geometry'])
             bounds = geom.bounds
-            minx, maxy = proj_to_raster(ds, *bounds[:2])
-            maxx, miny = proj_to_raster(ds, *bounds[2:])
+            minx, miny, maxx, maxy = self.get_bounds(img_file, bounds)
             boxes.append([minx, miny, maxx, maxy, 0])
 
         targets = np.array(boxes)
@@ -59,7 +65,6 @@ class Dataset(data.Dataset):
 
         if len(targets) == 0:
             return self[random.randint(0, len(self) - 1)]
-
 
         ridx = random.randint(0, len(targets) - 1)
 
@@ -104,37 +109,32 @@ class Dataset(data.Dataset):
             torch.from_numpy(input_.transpose((2,0,1))[(2,1,0),:,:]),
             np.hstack((targets, np.expand_dims(labels, axis=1)))
         )
-        
 
+class ProjDataset(SatelliteDataset):
+    def get_bounds(self, filename, bounds):
+        ds = gdal.Open(filename)
+        minx, maxy = proj_to_raster(ds, *bounds[:2])
+        maxx, miny = proj_to_raster(ds, *bounds[2:])
+        return minx, miny, maxx, maxy
 
+class RasterDataset(SatelliteDataset):
+    def get_bounds(self, filename, bounds):
+        return bounds
 
+class Dataset(data.Dataset):
+    def __init__(self, transform = lambda x, y: (x, y)):
+        self.skynet = ProjDataset('processedBuildingLabels', transform)
+        self.aigh_labeled = RasterDataset('training_data', transform)
 
+        N = max(len(self.skynet), len(self.aigh_labeled))
+        self.skynet.expand(N)
+        self.aigh_labeled.expand(N)
 
+    def __len__(self):
+        return len(self.skynet) + len(self.aigh_labeled)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    def __getitem__(self, idx):
+        if idx >= len(self.skynet):
+            return self.aigh_labeled[idx - len(self.skynet)]
+        else:
+            return self.aigh_labeled[idx]
