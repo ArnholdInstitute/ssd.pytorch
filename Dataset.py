@@ -43,8 +43,8 @@ class SatelliteDataset(data.Dataset):
 
     def __getitem__(self, idx):
         img_file = self.img_files[idx]
-        img_id = re.search('img(\d+).tif', img_file).group(1)
-        vector_file = os.path.join(self.root_dir, 'vectordata/geojson/Geo_AOI_1_RIO_img%s.geojson' % img_id)
+
+        vector_file = self.get_vector_file(img_file)
         vdata = json.load(open(vector_file, 'r'))
 
         if len(vdata['features']) == 0:
@@ -63,7 +63,7 @@ class SatelliteDataset(data.Dataset):
         mask = ((targets[:, 2] - targets[:, 0]) > 3) & ((targets[:, 3] - targets[:, 1]) > 3)
         targets = targets[mask, :]
 
-        if len(targets) == 0:
+        if len(targets) == 0 or img_data.shape[0] <= 300 or img_data.shape[1] <= 300:
             return self[random.randint(0, len(self) - 1)]
 
         ridx = random.randint(0, len(targets) - 1)
@@ -93,11 +93,19 @@ class SatelliteDataset(data.Dataset):
 
         targets = targets[mask, :]
 
-        sample = img_data[int(minx):int(maxx), int(miny):int(maxy), :]
+        sample = img_data[int(miny):int(maxy), int(minx):int(maxx), :]
 
         if sample.shape[0] != 300 and sample.shape[1] != 300:
             print('Wrong dimensions!')
             pdb.set_trace()
+
+        # data = sample.copy()
+        # for box in targets:
+        #     cv2.rectangle(data, tuple(map(int, box[:2])), tuple(map(int, box[2:4])), (0,0,255))
+
+        # cv2.imwrite('../samples/test/test.jpg', data)
+
+        # pdb.set_trace()
 
         input_, targets, labels = self.transform(sample, targets[:, :4], targets[:, -1])
 
@@ -117,24 +125,32 @@ class ProjDataset(SatelliteDataset):
         maxx, miny = proj_to_raster(ds, *bounds[2:])
         return minx, miny, maxx, maxy
 
+    def get_vector_file(self, img_file):
+        img_id = re.search('img(\d+).tif', img_file).group(1)
+        return os.path.join(self.root_dir, 'vectordata/geojson/Geo_AOI_1_RIO_img%s.geojson' % img_id)
+
 class RasterDataset(SatelliteDataset):
     def get_bounds(self, filename, bounds):
         return bounds
 
+    def get_vector_file(self, img_file):
+        return img_file.replace('3band', 'vectordata').replace('.jpg', '.geojson')
+
 class Dataset(data.Dataset):
     def __init__(self, transform = lambda x, y: (x, y)):
-        self.skynet = ProjDataset('processedBuildingLabels', transform)
+        self.spacenet = ProjDataset('processedBuildingLabels', transform)
         self.aigh_labeled = RasterDataset('training_data', transform)
 
-        N = max(len(self.skynet), len(self.aigh_labeled))
-        self.skynet.expand(N)
+        N = max(len(self.spacenet), len(self.aigh_labeled))
+        self.spacenet.expand(N)
         self.aigh_labeled.expand(N)
+        self.name = 'Spacenet + AIGH Labled Images'
 
     def __len__(self):
-        return len(self.skynet) + len(self.aigh_labeled)
+        return len(self.spacenet) + len(self.aigh_labeled)
 
     def __getitem__(self, idx):
-        if idx >= len(self.skynet):
-            return self.aigh_labeled[idx - len(self.skynet)]
+        if idx < len(self.spacenet):
+            return self.spacenet[idx]
         else:
-            return self.aigh_labeled[idx]
+            return self.aigh_labeled[idx - len(self.spacenet)]
