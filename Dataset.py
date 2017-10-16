@@ -1,7 +1,10 @@
-
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 from torch.utils import data
-import glob, pdb, os, re, json, gdal, random, cv2, numpy as np, torch
+import glob, pdb, os, re, json, gdal, random, cv2, numpy as np, torch, boto3
 from shapely.geometry import shape
+from datetime import datetime
+from skimage import io
 
 def proj_to_raster(ds, projx, projy):
     gm = ds.GetGeoTransform()
@@ -99,14 +102,6 @@ class SatelliteDataset(data.Dataset):
             print('Wrong dimensions!')
             pdb.set_trace()
 
-        # data = sample.copy()
-        # for box in targets:
-        #     cv2.rectangle(data, tuple(map(int, box[:2])), tuple(map(int, box[2:4])), (0,0,255))
-
-        # cv2.imwrite('../samples/test/test.jpg', data)
-
-        # pdb.set_trace()
-
         input_, targets, labels = self.transform(sample, targets[:, :4], targets[:, -1])
 
         if len(targets) == 0:
@@ -154,3 +149,52 @@ class Dataset(data.Dataset):
             return self.spacenet[idx]
         else:
             return self.aigh_labeled[idx - len(self.spacenet)]
+
+class InferenceGenerator:
+    def __init__(self, conn, country, transform = lambda x: x):
+        self.conn = conn
+        self.ts = datetime.now().isoformat()
+        self.s3 = boto3.client('s3')
+        self.country = country
+        self.transform = transform
+
+    def __iter__(self):
+        cur = self.conn.cursor()
+        write_cur = self.conn.cursor()
+        #cur.execute("SELECT filename FROM buildings.images WHERE project=%s", (self.country,))
+
+        cur.execute("""
+            SELECT filename FROM buildings.images
+            JOIN osm_buildings ON ST_Contains(images.shifted, osm_buildings.geom)
+            WHERE images.project=%s
+            GROUP BY filename HAVING COUNT(*) > 3
+        """, (self.country,))
+
+        for filename, in cur:
+            params = {'Bucket' : 'dg-images', 'Key' : filename}
+
+            url = self.s3.generate_presigned_url(ClientMethod='get_object', Params=params)
+            img = io.imread(url)[:,:,(2,1,0)] # RGB -> BGR (transform, then convert back)
+
+            for i in range(0, img.shape[0], 300):
+                for j in range(0, img.shape[1], 300):
+                    x, y = i, j
+                    if i+300 > img.shape[0]:
+                        x = img.shape[0] - 300
+                    if j + 300 > img.shape[1]:
+                        y = img.shape[1] - 300
+                    orig = img[x:x+300, y:y+300, :]
+                    yield (
+                        torch.from_numpy(self.transform(orig.copy().astype(float)).transpose((2,0,1))[(2,1,0),:,:]).float(),
+                        orig,
+                        (x, y, filename)
+                    )
+
+
+
+
+
+
+
+
+
