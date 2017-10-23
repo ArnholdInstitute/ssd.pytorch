@@ -17,9 +17,9 @@ class MultiBoxLoss(nn.Module):
            that comes with using a large number of default bounding boxes.
            (default negative:positive ratio 3:1)
     Objective Loss:
-        L(x,c,l,g) = (Lconf(x, c) + αLloc(x,l,g)) / N
+        L(x,c,l,g) = (Lconf(x, c) + alpha * Lloc(x,l,g)) / N
         Where, Lconf is the CrossEntropy Loss and Lloc is the SmoothL1 Loss
-        weighted by α which is set to 1 by cross val.
+        weighted by alpha *  which is set to 1 by cross val.
         Args:
             c: class confidences,
             l: predicted boxes,
@@ -108,7 +108,7 @@ class MultiBoxLoss(nn.Module):
         targets_weighted = conf_t[(pos+neg).gt(0)]
         loss_c = F.cross_entropy(conf_p, targets_weighted, size_average=False)
 
-        # Sum of losses: L(x,c,l,g) = (Lconf(x, c) + αLloc(x,l,g)) / N
+        # Sum of losses: L(x,c,l,g) = (Lconf(x, c) + alpha * Lloc(x,l,g)) / N
 
         N = num_pos.data.sum()
         loss_l /= N

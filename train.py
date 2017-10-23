@@ -130,7 +130,7 @@ def train():
     data_loader = data.DataLoader(dataset, batch_size, #num_workers=args.num_workers,
                                   shuffle=True, collate_fn=detection_collate, pin_memory=True)
 
-    scheduler = ReduceLROnPlateau(optimizer, patience=1000, min_lr=1e-6, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, patience=500, min_lr=1e-6, verbose=True)
 
     for iteration in range(args.start_iter, max_iter):
         if (not batch_iterator) or (iteration % epoch_size == 0):
@@ -166,7 +166,7 @@ def train():
         loc_loss += loss_l.data[0]
         conf_loss += loss_c.data[0]
         print('Timer: %.4f sec.' % (t1 - t0))
-        print('iter ' + repr(iteration) + ' || Loss: %.4f ||' % (loss.data[0]), end=' ')
+        print('iter %d || Loss: %.4f' % (iteration, loss.data[0]))
 
         scheduler.step(loss.data[0])
 

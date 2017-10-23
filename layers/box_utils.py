@@ -49,8 +49,6 @@ def jaccard(box_a, box_b):
     """Compute the jaccard overlap of two sets of boxes.  The jaccard overlap
     is simply the intersection over union of two boxes.  Here we operate on
     ground truth boxes and default boxes.
-    E.g.:
-        A ∩ B / A ∪ B = A ∩ B / (area(A) + area(B) - A ∩ B)
     Args:
         box_a: (tensor) Ground truth bounding boxes, Shape: [num_objects,4]
         box_b: (tensor) Prior boxes from priorbox layers, Shape: [num_priors,4]
