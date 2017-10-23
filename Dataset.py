@@ -1,75 +1,141 @@
 
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+import torch, cv2, boto3
 from torch.utils import data
-import glob, pdb, os, re, json, gdal, random, cv2, numpy as np, torch
+import glob, pdb, os, re, json, random, numpy as np, torch
 from shapely.geometry import shape
+from datetime import datetime
+from skimage import io
 
-def proj_to_raster(ds, projx, projy):
-    gm = ds.GetGeoTransform()
+SIZE = 300
 
-    # Transform per inverse of http://www.gdal.org/gdal_datamodel.html
-    x = (gm[5] * (projx - gm[0]) - gm[2] * (projy - gm[3])) / \
-        (gm[5] * gm[1] + gm[4] * gm[2])
-    y = (projy - gm[3] - x * gm[4]) / gm[5]
-    return x, y
+def RandomSampler(conn, country, transform):
+    ts = datetime.now().isoformat()
+    s3 = boto3.client('s3')
+    read_cur = conn.cursor()
+    write_cur = conn.cursor()
 
-def raster_to_proj(ds, x, y):
-    gm = ds.GetGeoTransform()
+    read_cur.execute("""
+        SELECT filename FROM buildings.images
+        WHERE project=%s AND (done IS NULL OR done=false)
+        ORDER BY random()
+    """, (country,))
 
-    # Transform per http://www.gdal.org/gdal_datamodel.html
-    projx = gm[0] + gm[1] * x + gm[2] * y
-    projy = gm[3] + gm[4] * x + gm[5] * y
-    return projx, projy
+    for filename, in read_cur:
+        params = {'Bucket' : 'dg-images', 'Key' : filename}
+        url = s3.generate_presigned_url(ClientMethod='get_object', Params=params)
+        # Convert from RGB -> BGR and also strip off the bottom logo
 
-class SatelliteDataset(data.Dataset):
-    def __init__(self, root_dir, transform = lambda x, y: (x, y)):
+        img = io.imread(url)[:-25,:,(2,1,0)]
+
+        for i in range(0, img.shape[0], SIZE):
+            for j in range(0, img.shape[1], SIZE):
+                x, y = i, j
+                if i+SIZE > img.shape[0]:
+                    x = img.shape[0] - SIZE
+                if j + SIZE > img.shape[1]:
+                    y = img.shape[1] - SIZE
+                orig = img[x:x+SIZE, y:y+SIZE, :]
+                yield (
+                    torch.from_numpy(transform(orig.copy().astype(float)).transpose((2,0,1))[(2,1,0),:,:]).float(),
+                    orig,
+                    (x, y, filename, img)
+                )
+
+def InferenceGenerator(conn, country, area_to_cover = None, transform=lambda x: x):
+    ts = datetime.now().isoformat()
+    s3 = boto3.client('s3')
+
+    condition = ''
+    if area_to_cover:
+        condition = " AND ST_Contains(ST_GeomFromText('%s', 4326), shifted)" % area_to_cover.wkt
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT filename FROM buildings.images
+            WHERE project=%%s %s
+        """ % condition, (country,))
+
+        for filename, in cur:
+            params = {'Bucket' : 'dg-images', 'Key' : filename}
+            url = s3.generate_presigned_url(ClientMethod='get_object', Params=params)
+            # Convert from RGB -> BGR and also strip off the bottom logo
+            img = io.imread(url)[:-25,:,(2,1,0)]
+
+            for i in range(0, img.shape[0], SIZE):
+                for j in range(0, img.shape[1], SIZE):
+                    x, y = i, j
+                    if i+SIZE > img.shape[0]:
+                        x = img.shape[0] - SIZE
+                    if j + SIZE > img.shape[1]:
+                        y = img.shape[1] - SIZE
+                    orig = img[x:x+SIZE, y:y+SIZE, :]
+                    yield (
+                        torch.from_numpy(transform(orig.copy().astype(float)).transpose((2,0,1))[(2,1,0),:,:]).float(),
+                        orig,
+                        (x, y, filename)
+                    )
+
+class Dataset(data.Dataset):
+    def __init__(self, root_dir, samples, transform = lambda a1,a2,a3: (a1,a2,a3)):
         self.root_dir = root_dir   
-        self.img_files = glob.glob(os.path.join(root_dir, '3band/*'))
         self.transform = transform
+        self.samples = samples
+
+    def even(self):
+        projs = {}
+        for sample in self.samples:
+            if len(sample['rects']) > 0:
+                proj = re.search('(.*[^\d])(\d+)\.', os.path.basename(sample['image_path'])).group(1)
+                if proj in projs:
+                    projs[proj].append(sample)
+                else:
+                    projs[proj] = [sample]
+
+        samples = []
+
+        max_size = max([len(projs[k]) for k in projs.keys()])
+        for proj in projs.keys():
+            arr = projs[proj]
+            count = 0
+            while count + len(arr) <= max_size and count / 10 < len(arr):
+                samples.extend(arr)
+                count += len(arr)
+            diff = (max_size - len(arr)) % len(arr)
+            print('Added %d samples from %s' % (diff + count, proj))
+            random.shuffle(arr)
+            samples.extend(arr[:diff])
+        self.samples = samples
+        return self
 
     def __len__(self):
-        return len(self.img_files)
-
-    def expand(self, N):
-        """
-        Pad this dataset to have N elements
-        """
-        delta = N - len(self.img_files)
-        to_add = []
-        while delta > len(self.img_files):
-            to_add.extend(self.img_files)
-            delta -= len(self.img_files)
-        to_add.extend(self.img_files[:delta])
-        self.img_files.extend(to_add)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        img_file = self.img_files[idx]
+        sample = self.samples[idx]
+        filename = sample['image_path']
 
-        vector_file = self.get_vector_file(img_file)
-        vdata = json.load(open(vector_file, 'r'))
-
-        if len(vdata['features']) == 0:
+        if len(sample['rects']) == 0:
             return self[random.randint(0, len(self) - 1)]
 
-        img_data = cv2.imread(img_file)
+        img_data = cv2.imread(os.path.join(self.root_dir, sample['image_path']))
         boxes = []
-        for feature in vdata['features']:
-            geom = shape(feature['geometry'])
-            bounds = geom.bounds
-            minx, miny, maxx, maxy = self.get_bounds(img_file, bounds)
-            boxes.append([minx, miny, maxx, maxy, 0])
+        for f in sample['rects']:
+            boxes.append([f['x1'], f['y1'], f['x2'], f['y2'], 0])
 
-        targets = np.array(boxes)
+        targets = np.array(boxes).astype(float)
 
         mask = ((targets[:, 2] - targets[:, 0]) > 3) & ((targets[:, 3] - targets[:, 1]) > 3)
         targets = targets[mask, :]
 
-        if len(targets) == 0 or img_data.shape[0] <= 300 or img_data.shape[1] <= 300:
+        if len(targets) == 0 or img_data.shape[0] <= SIZE or img_data.shape[1] <= SIZE:
             return self[random.randint(0, len(self) - 1)]
 
         ridx = random.randint(0, len(targets) - 1)
 
         cx, cy = round(np.mean(targets[ridx, (0, 2)])), round(np.mean(targets[ridx, (1, 3)]))
-        minx, miny, maxx, maxy = cx - 150, cy - 150, cx + 150, cy + 150
+        minx, miny, maxx, maxy = cx - (SIZE/2), cy - (SIZE/2), cx + (SIZE/2), cy + (SIZE/2)
 
         if minx < 0:
             dx = -minx
@@ -87,7 +153,7 @@ class SatelliteDataset(data.Dataset):
         targets[:, (0, 2)] -= minx
         targets[:, (1, 3)] -= miny
 
-        targets = np.clip(targets, a_min = 0, a_max = 300)
+        targets = np.clip(targets, a_min = 0, a_max = SIZE)
 
         mask = ((targets[:, 2] - targets[:, 0]) > 3) & ((targets[:, 3] - targets[:, 1]) > 3)
 
@@ -95,17 +161,9 @@ class SatelliteDataset(data.Dataset):
 
         sample = img_data[int(miny):int(maxy), int(minx):int(maxx), :]
 
-        if sample.shape[0] != 300 and sample.shape[1] != 300:
+        if sample.shape[0] != SIZE and sample.shape[1] != SIZE:
             print('Wrong dimensions!')
             pdb.set_trace()
-
-        # data = sample.copy()
-        # for box in targets:
-        #     cv2.rectangle(data, tuple(map(int, box[:2])), tuple(map(int, box[2:4])), (0,0,255))
-
-        # cv2.imwrite('../samples/test/test.jpg', data)
-
-        # pdb.set_trace()
 
         input_, targets, labels = self.transform(sample, targets[:, :4], targets[:, -1])
 
@@ -114,43 +172,6 @@ class SatelliteDataset(data.Dataset):
             pdb.set_trace()
 
         return (
-            torch.from_numpy(input_.transpose((2,0,1))[(2,1,0),:,:]),
+            torch.from_numpy(input_.transpose((2,0,1))[(2,1,0),:,:]).float(),
             np.hstack((targets, np.expand_dims(labels, axis=1)))
         )
-
-class ProjDataset(SatelliteDataset):
-    def get_bounds(self, filename, bounds):
-        ds = gdal.Open(filename)
-        minx, maxy = proj_to_raster(ds, *bounds[:2])
-        maxx, miny = proj_to_raster(ds, *bounds[2:])
-        return minx, miny, maxx, maxy
-
-    def get_vector_file(self, img_file):
-        img_id = re.search('img(\d+).tif', img_file).group(1)
-        return os.path.join(self.root_dir, 'vectordata/geojson/Geo_AOI_1_RIO_img%s.geojson' % img_id)
-
-class RasterDataset(SatelliteDataset):
-    def get_bounds(self, filename, bounds):
-        return bounds
-
-    def get_vector_file(self, img_file):
-        return img_file.replace('3band', 'vectordata').replace('.jpg', '.geojson')
-
-class Dataset(data.Dataset):
-    def __init__(self, transform = lambda x, y: (x, y)):
-        self.spacenet = ProjDataset('processedBuildingLabels', transform)
-        self.aigh_labeled = RasterDataset('training_data', transform)
-
-        N = max(len(self.spacenet), len(self.aigh_labeled))
-        self.spacenet.expand(N)
-        self.aigh_labeled.expand(N)
-        self.name = 'Spacenet + AIGH Labled Images'
-
-    def __len__(self):
-        return len(self.spacenet) + len(self.aigh_labeled)
-
-    def __getitem__(self, idx):
-        if idx < len(self.spacenet):
-            return self.spacenet[idx]
-        else:
-            return self.aigh_labeled[idx - len(self.spacenet)]
