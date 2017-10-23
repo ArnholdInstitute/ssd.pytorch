@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
-import os
-import torch
+import os, torch, json, time, pdb, numpy as np
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -14,8 +13,6 @@ from data import v2, v1, detection_collate
 from utils.augmentations import SSDAugmentation
 from layers.modules import MultiBoxLoss
 from ssd import build_ssd
-import numpy as np
-import time, pdb
 from Dataset import Dataset
 
 def str2bool(v):
@@ -44,7 +41,7 @@ if args.cuda and torch.cuda.is_available():
 else:
     torch.set_default_tensor_type('torch.FloatTensor')
 
-cfg = (v1, v2)[args.version == 'v2']
+cfg = v2
 
 if not os.path.exists(args.save_folder):
     os.mkdir(args.save_folder)
@@ -67,7 +64,7 @@ ssd_net = build_ssd('train', 300, num_classes)
 net = ssd_net
 
 if args.cuda:
-    net = torch.nn.DataParallel(ssd_net)
+    # net = torch.nn.DataParallel(ssd_net)
     cudnn.benchmark = True
 
 if args.resume:
@@ -121,10 +118,12 @@ def train():
     epoch = 0
     print('Loading Dataset...')
 
-    dataset = Dataset(SSDAugmentation(ssd_dim, means))
+    train_data = json.load(open('../data/train_data.json'))
+
+    # dataset = Dataset(SSDAugmentation(ssd_dim, means))
+    dataset = Dataset('../data', train_data, transform=SSDAugmentation(ssd_dim, means)).even()
 
     epoch_size = len(dataset) // args.batch_size
-    print('Training SSD on', dataset.name)
     step_index = 0
     batch_iterator = None
     data_loader = data.DataLoader(dataset, batch_size, #num_workers=args.num_workers,
