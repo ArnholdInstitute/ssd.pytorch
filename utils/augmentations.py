@@ -1,4 +1,4 @@
-import torch
+import torch, pdb
 from torchvision import transforms
 import cv2
 import numpy as np
@@ -370,6 +370,22 @@ class SwapChannels(object):
         image = image[:, :, self.swaps]
         return image
 
+class Rotate(object):
+    def __init__(self):
+        self.degrees = [0, 90, 180, 270]
+
+    def __call__(self, image, boxes, labels):
+        rows, cols, _ = image.shape
+        degrees = self.degrees[random.randint(len(self.degrees))]
+        M = cv2.getRotationMatrix2D((cols/2, rows/2), degrees, 1)
+        warped = cv2.warpAffine(image, M, (cols, rows))
+
+        warped_boxes = boxes.copy()
+        warped_boxes[:, (0, 2)] = M[0,0] * boxes[:, (0, 2)] + \
+            M[0,1] * boxes[:, (1, 3)] + M[0, 2]
+        warped_boxes[:, (1, 3)] = M[1,0] * boxes[:, (0, 2)] + \
+            M[1,1] * boxes[:, (1, 3)] + M[1, 2]
+        return warped, warped_boxes, labels
 
 class PhotometricDistort(object):
     def __init__(self):
@@ -401,8 +417,9 @@ class SSDAugmentation(object):
         self.size = size
         self.augment = Compose([
             ConvertFromInts(),
+            Rotate(),
             # ToAbsoluteCoords(),
-            PhotometricDistort(),
+            # PhotometricDistort(),
             # Expand(self.mean),
             # RandomSampleCrop(),
             RandomMirror(),
