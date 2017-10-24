@@ -385,7 +385,13 @@ class Rotate(object):
             M[0,1] * boxes[:, (1, 3)] + M[0, 2]
         warped_boxes[:, (1, 3)] = M[1,0] * boxes[:, (0, 2)] + \
             M[1,1] * boxes[:, (1, 3)] + M[1, 2]
-        return warped, warped_boxes, labels
+
+        boxes[:, 0] = warped_boxes[:, (0, 2)].min(axis=1)
+        boxes[:, 2] = warped_boxes[:, (0, 2)].max(axis=1)
+        boxes[:, 1] = warped_boxes[:, (1, 3)].min(axis=1)
+        boxes[:, 3] = warped_boxes[:, (1, 3)].max(axis=1)
+
+        return warped, boxes, labels
 
 class PhotometricDistort(object):
     def __init__(self):
