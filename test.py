@@ -1,8 +1,7 @@
+#!/usr/bin/env python
+
 from __future__ import print_function
-import sys
-import os
-import argparse
-import torch
+import sys, os, argparse, torch, psycopg2, pdb, numpy as np
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 import torchvision.transforms as transforms
@@ -12,13 +11,17 @@ from PIL import Image
 from data import AnnotationTransform, VOCDetection, BaseTransform, VOC_CLASSES
 import torch.utils.data as data
 from ssd import build_ssd
+from Dataset import RandomSampler
+from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
 
 parser = argparse.ArgumentParser(description='Single Shot MultiBox Detection')
-parser.add_argument('--trained_model', default='weights/ssd_300_VOC0712.pth',
+parser.add_argument('--weights', default='weights/ssd_300_VOC0712.pth',
                     type=str, help='Trained state_dict file path to open')
 parser.add_argument('--save_folder', default='eval/', type=str,
                     help='Dir to save results')
-parser.add_argument('--visual_threshold', default=0.6, type=float,
+parser.add_argument('--country', required=True, help='Which country to test on')
+parser.add_argument('--thresh', default=0.6, type=float,
                     help='Final confidence threshold')
 parser.add_argument('--cuda', default=False, type=bool,
                     help='Use cuda to train model')
@@ -29,61 +32,89 @@ args = parser.parse_args()
 if not os.path.exists(args.save_folder):
     os.mkdir(args.save_folder)
 
+class Scale:
+    def __init__(self, min_val, max_val):
+        self.min_val = min_val
+        self.max_val = max_val
 
-def test_net(save_folder, net, cuda, testset, transform, thresh):
-    # dump predictions and assoc. ground truth to text file for now
-    filename = save_folder+'test1.txt'
-    num_images = len(testset)
-    for i in range(num_images):
-        print('Testing image {:d}/{:d}....'.format(i+1, num_images))
-        img = testset.pull_image(i)
-        img_id, annotation = testset.pull_anno(i)
-        x = torch.from_numpy(transform(img)[0]).permute(2, 0, 1)
-        x = Variable(x.unsqueeze(0))
+    def rgb(self, val):
+        return (
+            255 * (1.0 - val), # Blue
+            0,
+            255 * val
+        )
 
-        with open(filename, mode='a') as f:
-            f.write('\nGROUND TRUTH FOR: '+img_id+'\n')
-            for box in annotation:
-                f.write('label: '+' || '.join(str(b) for b in box)+'\n')
-        if cuda:
-            x = x.cuda()
+def test_net(save_folder, net, generator, thresh, batch_size):
+    while True:
+        inputs, originals, meta = zip(*[next(generator) for _ in range(batch_size)])
+        inputs = Variable(torch.stack(inputs, 0).cuda())
 
-        y = net(x)      # forward pass
-        detections = y.data
-        # scale each detection back up to the image
-        scale = torch.Tensor([img.shape[1], img.shape[0],
-                             img.shape[1], img.shape[0]])
-        pred_num = 0
-        for i in range(detections.size(1)):
-            j = 0
-            while detections[0, i, j, 0] >= 0.6:
-                if pred_num == 0:
-                    with open(filename, mode='a') as f:
-                        f.write('PREDICTIONS: '+'\n')
-                score = detections[0, i, j, 0]
-                label_name = labelmap[i-1]
-                pt = (detections[0, i, j, 1:]*scale).cpu().numpy()
-                coords = (pt[0], pt[1], pt[2], pt[3])
-                pred_num += 1
-                with open(filename, mode='a') as f:
-                    f.write(str(pred_num)+' label: '+label_name+' score: ' +
-                            str(score) + ' '+' || '.join(str(c) for c in coords) + '\n')
-                j += 1
+        y = net(inputs)      # forward pass
+        detections = y.data.cpu().numpy()
+
+        for i in range(len(detections)):
+            dets = detections[i, 1]
+            roff, coff, filename, whole_img = meta[i]
+            orig = originals[i]
+
+            dets[:, (1, 3)] = np.clip(dets[:, (1, 3)] * orig.shape[1], a_min=0, a_max = orig.shape[1])
+            dets[:, (2, 4)] = np.clip(dets[:, (2, 4)] * orig.shape[2], a_min=0, a_max = orig.shape[0])
+
+            valid_dets = dets[dets[:, 0] >= thresh, :]
+
+            if len(valid_dets) == 0:
+                continue
+
+            scale = Scale(valid_dets[:, 0].min(), valid_dets[:, 0].max())
+
+            for det in valid_dets:
+
+                pdb.set_trace()
 
 
 if __name__ == '__main__':
     # load net
-    num_classes = len(VOC_CLASSES) + 1 # +1 background
+    num_classes = 2 # +1 background
     net = build_ssd('test', 300, num_classes) # initialize SSD
-    net.load_state_dict(torch.load(args.trained_model))
+    net.load_state_dict(torch.load(args.weights)['state_dict'])
     net.eval()
     print('Finished loading model!')
     # load data
-    testset = VOCDetection(args.voc_root, [('2007', 'test')], None, AnnotationTransform())
-    if args.cuda:
-        net = net.cuda()
-        cudnn.benchmark = True
+
+    conn = psycopg2.connect(
+        dbname='aigh',
+        host=os.environ.get('DB_HOST', 'localhost'),
+        user=os.environ.get('DB_USER', ''),
+        password=os.environ.get('DB_PASSWORD', '')
+    )
+
+    gen = RandomSampler(conn, args.country, BaseTransform(net.size, (104, 117, 123)))
+
+    net = net.cuda()
+    cudnn.benchmark = True
     # evaluation
-    test_net(args.save_folder, net, args.cuda, testset,
-             BaseTransform(net.size, (104, 117, 123)),
-             thresh=args.visual_threshold)
+    test_net(args.save_folder, net, gen, args.thresh, 32)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
