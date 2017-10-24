@@ -37,8 +37,9 @@ def RandomSampler(conn, country, transform):
                 if j + SIZE > img.shape[1]:
                     y = img.shape[1] - SIZE
                 orig = img[x:x+SIZE, y:y+SIZE, :]
+                transformed, _, _ = transform(orig.copy().astype(float))
                 yield (
-                    torch.from_numpy(transform(orig.copy().astype(float)).transpose((2,0,1))[(2,1,0),:,:]).float(),
+                    torch.from_numpy(transformed.transpose((2,0,1))[(2,1,0),:,:]).float(),
                     orig,
                     (x, y, filename, img)
                 )
