@@ -1,10 +1,14 @@
-import torch
+import torch, pdb
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from layers import *
-from data import v2
+from data import v3
 import os
+from torchvision.models import vgg16
+from torchvision.models.vgg import model_urls
+
+model_urls['vgg16'] = model_urls['vgg16'].replace('https://', 'http://')
 
 
 #https://discuss.pytorch.org/t/why-softmax-function-cant-specify-the-dimension-to-operate/2637
@@ -40,7 +44,7 @@ class SSD(nn.Module):
         self.phase = phase
         self.num_classes = num_classes
         # TODO: implement __call__ in PriorBox
-        self.priorbox = PriorBox(v2)
+        self.priorbox = PriorBox(v3)
         self.priors = Variable(self.priorbox.forward(), volatile=True)
         self.size = 300
 
@@ -53,9 +57,17 @@ class SSD(nn.Module):
         self.loc = nn.ModuleList(head[0])
         self.conf = nn.ModuleList(head[1])
 
-        if phase == 'test':
-            self.softmax = nn.Softmax()
-            self.detect = Detect(num_classes, 0, 200, 0.01, 0.45)
+        vgg_layers = list(vgg16(pretrained=True).features.children())[:-1] + \
+            [
+                nn.MaxPool2d(kernel_size=3, stride=1, padding=1),
+                nn.Conv2d(512, 1024, kernel_size=3, padding=6, dilation=6),
+                nn.SELU(inplace=True),
+                nn.Conv2d(1024, 1024, kernel_size=1), 
+                nn.SELU(inplace=True)
+            ]
+
+        self.vgg1 = nn.Sequential(*vgg_layers[:23])
+        self.vgg2 = nn.Sequential(*vgg_layers[23:])
 
     def forward(self, x):
         """Applies network layers and ops on input image(s) x.
@@ -79,17 +91,11 @@ class SSD(nn.Module):
         sources = list()
         loc = list()
         conf = list()
-
-        # apply vgg up to conv4_3 relu
-        for k in range(23):
-            x = self.vgg[k](x)
-
+        
+        x = self.vgg1(x)
         s = self.L2Norm(x)
         sources.append(s)
-
-        # apply vgg up to fc7
-        for k in range(23, len(self.vgg)):
-            x = self.vgg[k](x)
+        x = self.vgg2(x)
         sources.append(x)
 
         # apply extra layers and cache source layer outputs
@@ -100,11 +106,15 @@ class SSD(nn.Module):
 
         # apply multibox head to source layers
         for (x, l, c) in zip(sources, self.loc, self.conf):
-            loc.append(l(x).permute(0, 2, 3, 1).contiguous())
-            conf.append(c(x).permute(0, 2, 3, 1).contiguous())
+            try:
+                loc.append(l(x).permute(0, 2, 3, 1).contiguous())
+                conf.append(c(x).permute(0, 2, 3, 1).contiguous())
+            except Exception as e:
+                pdb.set_trace()
 
         loc = torch.cat([o.view(o.size(0), -1) for o in loc], 1)
         conf = torch.cat([o.view(o.size(0), -1) for o in conf], 1)
+
         if self.phase == "test":
             output = self.detect(
                 loc.view(loc.size(0), -1, 4),                   # loc preds
@@ -142,15 +152,15 @@ def vgg(cfg, i, batch_norm=False):
         else:
             conv2d = nn.Conv2d(in_channels, v, kernel_size=3, padding=1)
             if batch_norm:
-                layers += [conv2d, nn.BatchNorm2d(v), nn.ReLU(inplace=True)]
+                layers += [conv2d, nn.BatchNorm2d(v), nn.SELU(inplace=True)]
             else:
-                layers += [conv2d, nn.ReLU(inplace=True)]
+                layers += [conv2d, nn.SELU(inplace=True)]
             in_channels = v
     pool5 = nn.MaxPool2d(kernel_size=3, stride=1, padding=1)
     conv6 = nn.Conv2d(512, 1024, kernel_size=3, padding=6, dilation=6)
     conv7 = nn.Conv2d(1024, 1024, kernel_size=1)
     layers += [pool5, conv6,
-               nn.ReLU(inplace=True), conv7, nn.ReLU(inplace=True)]
+               nn.SELU(inplace=True), conv7, nn.SELU(inplace=True)]
     return layers
 
 

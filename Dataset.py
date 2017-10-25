@@ -7,6 +7,7 @@ import glob, pdb, os, re, json, random, numpy as np, torch
 from shapely.geometry import shape
 from datetime import datetime
 from skimage import io
+from torchvision import transforms 
 
 SIZE = 300
 
@@ -120,7 +121,9 @@ class Dataset(data.Dataset):
         if len(sample['rects']) == 0:
             return self[random.randint(0, len(self) - 1)]
 
-        img_data = cv2.imread(os.path.join(self.root_dir, sample['image_path']))
+        # Read image and convert to RGB
+        img_data = cv2.imread(os.path.join(self.root_dir, sample['image_path']))[:,:,(2,1,0)]
+
         boxes = []
         for f in sample['rects']:
             boxes.append([f['x1'], f['y1'], f['x2'], f['y2'], 0])
@@ -162,17 +165,15 @@ class Dataset(data.Dataset):
 
         sample = img_data[int(miny):int(maxy), int(minx):int(maxx), :]
 
-        if sample.shape[0] != SIZE and sample.shape[1] != SIZE:
-            print('Wrong dimensions!')
-            pdb.set_trace()
-
         input_, targets, labels = self.transform(sample, targets[:, :4], targets[:, -1])
 
-        if len(targets) == 0:
-            print('No boxes!')
-            pdb.set_trace()
+        normalize = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],  std=[0.229, 0.224, 0.225])
+        ])
+
 
         return (
-            torch.from_numpy(input_.transpose((2,0,1))[(2,1,0),:,:]).float(),
+            normalize(input_).float(),
             np.hstack((targets, np.expand_dims(labels, axis=1)))
         )
