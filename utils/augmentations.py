@@ -416,6 +416,43 @@ class PhotometricDistort(object):
         im, boxes, labels = distort(im, boxes, labels)
         return self.rand_light_noise(im, boxes, labels)
 
+def CropAndScale(image, boxes, labels):
+    h, w, c = image.shape
+    x_crop = random.randint(1, 50)
+    y_crop = random.randint(1, 50)
+    orig_boxes = boxes.copy()
+
+    if random.randint(2) == 0:
+        cropped = image[x_crop:, y_crop:, :]
+        boxes[:, (0, 2)] -= y_crop
+        boxes[:, (1, 3)] -= x_crop
+    else:
+        cropped = image[:-x_crop, :-y_crop, :]
+
+    boxes[:, (0, 2)] = np.clip(boxes[:, (0, 2)], a_min = 0, a_max = w - y_crop)
+    boxes[:, (1, 3)] = np.clip(boxes[:, (1, 3)], a_min = 0, a_max = h - x_crop)
+
+    mask = (boxes[:, 2] - boxes[:, 0] > 3) & (boxes[:, 3] - boxes[:, 1] > 3)
+    boxes = boxes[mask, :]
+    labels = labels[mask]
+
+    cropped = cv2.resize(cropped, (h, w))
+
+    boxes[:, (0, 2)] = boxes[:, (0, 2)] / (w - y_crop) * w
+    boxes[:, (1, 3)] = boxes[:, (1, 3)] / (h - x_crop) * h
+
+    # for box in boxes.round().astype(int):
+    #     cv2.rectangle(cropped, tuple(box[:2]), tuple(box[2:]), (0, 0, 255))
+
+    # image = image.copy()
+    # for box in orig_boxes.astype(int):
+    #     cv2.rectangle(image, tuple(box[:2]), tuple(box[2:]), (0, 0, 255))
+
+    # data = np.concatenate([image, cropped], axis=1)
+
+    # cv2.imwrite('./image.jpg', data)
+
+    return cropped, boxes, labels
 
 class SSDAugmentation(object):
     def __init__(self, size=300, mean=(104, 117, 123)):
@@ -429,9 +466,10 @@ class SSDAugmentation(object):
             # Expand(self.mean),
             # RandomSampleCrop(),
             RandomMirror(),
+            CropAndScale,
             ToPercentCoords(),
             Resize(self.size),
-            SubtractMeans(self.mean)
+            # SubtractMeans(self.mean)
         ])
 
     def __call__(self, img, boxes, labels):
