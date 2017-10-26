@@ -68,6 +68,7 @@ class SSD(nn.Module):
 
         self.vgg1 = nn.Sequential(*vgg_layers[:23])
         self.vgg2 = nn.Sequential(*vgg_layers[23:])
+        self.detect = Detect(num_classes, 0, 200, 0.01, 0.45)
 
     def forward(self, x):
         """Applies network layers and ops on input image(s) x.
