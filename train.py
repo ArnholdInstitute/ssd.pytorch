@@ -9,7 +9,7 @@ import torch.nn.init as init
 import argparse
 from torch.autograd import Variable
 import torch.utils.data as data
-from data import v2, v1, detection_collate
+from data import detection_collate
 from utils.augmentations import SSDAugmentation
 from layers.modules import MultiBoxLoss
 from ssd import build_ssd
@@ -43,8 +43,6 @@ if args.cuda and torch.cuda.is_available():
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
 else:
     torch.set_default_tensor_type('torch.FloatTensor')
-
-cfg = v2
 
 if not os.path.exists(args.save_folder):
     os.mkdir(args.save_folder)
