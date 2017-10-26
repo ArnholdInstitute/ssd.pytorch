@@ -163,6 +163,7 @@ class Dataset(data.Dataset):
 
         targets = targets[mask, :]
 
+	
         sample = img_data[int(miny):int(maxy), int(minx):int(maxx), :]
 
         input_, targets, labels = self.transform(sample, targets[:, :4], targets[:, -1])
@@ -171,6 +172,8 @@ class Dataset(data.Dataset):
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406],  std=[0.229, 0.224, 0.225])
         ])
+	if len(targets) == 0:
+		return self[random.randint(0, len(self) - 1)]
 
 
         return (
