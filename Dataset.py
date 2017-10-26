@@ -169,8 +169,7 @@ class Dataset(data.Dataset):
         input_, targets, labels = self.transform(sample, targets[:, :4], targets[:, -1])
 
         if len(targets) == 0:
-            print('No boxes!')
-            pdb.set_trace()
+            return self[random.randint(0, len(self) - 1)]
 
         return (
             torch.from_numpy(input_.transpose((2,0,1))[(2,1,0),:,:]).float(),
