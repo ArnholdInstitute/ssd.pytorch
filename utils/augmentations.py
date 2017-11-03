@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 import torch, pdb
 from torchvision import transforms
 import cv2
@@ -441,18 +442,48 @@ def CropAndScale(image, boxes, labels):
     boxes[:, (0, 2)] = boxes[:, (0, 2)] / (w - y_crop) * w
     boxes[:, (1, 3)] = boxes[:, (1, 3)] / (h - x_crop) * h
 
-    # for box in boxes.round().astype(int):
-    #     cv2.rectangle(cropped, tuple(box[:2]), tuple(box[2:]), (0, 0, 255))
-
-    # image = image.copy()
-    # for box in orig_boxes.astype(int):
-    #     cv2.rectangle(image, tuple(box[:2]), tuple(box[2:]), (0, 0, 255))
-
-    # data = np.concatenate([image, cropped], axis=1)
-
-    # cv2.imwrite('./image.jpg', data)
-
     return cropped, boxes, labels
+
+def PerspectiveTransform(image, boxes, labels):
+    src = np.array([
+        list(random.randint(0, 50, 2)),
+        [random.randint(250, 300), random.randint(50)],
+        list(random.randint(250, 300, 2)),
+        [random.randint(50), random.randint(250, 300)]
+    ], dtype = 'float32')
+    dst = np.array([
+        [0, 0],
+        [image.shape[1] - 1, 0],
+        [image.shape[1] - 1, image.shape[0] - 1],
+        [0, image.shape[0] - 1]
+    ], dtype = 'float32')
+
+    M = cv2.getPerspectiveTransform(src, dst)
+    warped = cv2.warpPerspective(image, M, image.shape[:2])
+
+    temp = boxes.copy()
+    temp[:, :2] = cv2.perspectiveTransform(np.expand_dims(boxes[:, :2], 0), M)
+    temp[:, 2:] = cv2.perspectiveTransform(np.expand_dims(boxes[:, 2:], 0), M)
+
+    warped_boxes = temp.copy()
+
+    warped_boxes[:, 0] = temp[:, (0, 2)].min(axis=1)
+    warped_boxes[:, 1] = temp[:, (1, 3)].min(axis=1)
+    warped_boxes[:, 2] = temp[:, (0, 2)].max(axis=1)
+    warped_boxes[:, 3] = temp[:, (1, 3)].max(axis=1)
+
+    warped_boxes = np.clip(warped_boxes, a_min=0, a_max=300)
+    mask = (warped_boxes[:, 2] - warped_boxes[:, 0] > 3) & (warped_boxes[:, 3] - warped_boxes[:, 1] > 3)
+    warped_boxes = warped_boxes[mask]
+
+    return warped, warped_boxes, labels[mask]
+
+def Warp(image, boxes, labels):
+    rint = random.randint(0, 2)
+    if rint == 0:
+        return CropAndScale(image, boxes, labels)
+    elif rint == 1:
+        return PerspectiveTransform(image, boxes, labels)
 
 class SSDAugmentation(object):
     def __init__(self, size=300, mean=(104, 117, 123)):
@@ -463,14 +494,54 @@ class SSDAugmentation(object):
             Rotate(),
             # ToAbsoluteCoords(),
             # PhotometricDistort(),
-            # Expand(self.mean),
-            # RandomSampleCrop(),
             RandomMirror(),
-            CropAndScale,
+            Warp,
             ToPercentCoords(),
             Resize(self.size),
-            # SubtractMeans(self.mean)
+            SubtractMeans(self.mean)
         ])
 
     def __call__(self, img, boxes, labels):
         return self.augment(img, boxes, labels)
+
+if __name__ == '__main__':
+    import json, pdb, os
+
+    data = json.load(open('../../data/train_data.json'))
+
+    img = cv2.imread(os.path.join('../../data', data[0]['image_path']))
+    boxes = np.array([[r['x1'], r['y1'], r['x2'], r['y2']] for r in data[0]['rects']])
+    img = img[:300, :300, :]
+    boxes = np.clip(boxes, a_min=0, a_max=300)
+    mask = (boxes[:, 2] - boxes[:, 0] > 3) & (boxes[:, 3] - boxes[:, 1] > 3)
+    boxes = boxes[mask]
+
+    aug = SSDAugmentation()
+    aug(img, boxes, np.ones((len(boxes))))
+
+    pdb.set_trace()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
