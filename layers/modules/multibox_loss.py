@@ -1,4 +1,4 @@
-import torch
+import torch, pdb
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -62,9 +62,11 @@ class MultiBoxLoss(nn.Module):
         num_classes = self.num_classes
 
         # match priors (default boxes) and ground truth boxes
-        loc_t = torch.Tensor(num, num_priors, 4)
-        conf_t = torch.LongTensor(num, num_priors)
+        loc_t = torch.Tensor(num, num_priors, 4).zero_()
+        conf_t = torch.LongTensor(num, num_priors).zero_()
         for idx in range(num):
+            if len(targets[idx]) == 0:
+                continue
             truths = targets[idx][:, :-1].data
             labels = targets[idx][:, -1].data
             defaults = priors.data
@@ -98,7 +100,7 @@ class MultiBoxLoss(nn.Module):
         _, loss_idx = loss_c.sort(1, descending=True)
         _, idx_rank = loss_idx.sort(1)
         num_pos = pos.long().sum(1, keepdim=True)
-        num_neg = torch.clamp(self.negpos_ratio*num_pos, max=pos.size(1)-1)
+        num_neg = torch.clamp(self.negpos_ratio*num_pos, max=pos.size(1)-1, min=32)
         neg = idx_rank < num_neg.expand_as(idx_rank)
 
         # Confidence Loss Including Positive and Negative Examples
@@ -106,11 +108,12 @@ class MultiBoxLoss(nn.Module):
         neg_idx = neg.unsqueeze(2).expand_as(conf_data)
         conf_p = conf_data[(pos_idx+neg_idx).gt(0)].view(-1, self.num_classes)
         targets_weighted = conf_t[(pos+neg).gt(0)]
+
         loss_c = F.cross_entropy(conf_p, targets_weighted, size_average=False)
 
         # Sum of losses: L(x,c,l,g) = (Lconf(x, c) + alpha * Lloc(x,l,g)) / N
 
-        N = num_pos.data.sum()
+        N = num_pos.data.sum() + num_neg.data.sum()
         loss_l /= N
         loss_c /= N
         return loss_l, loss_c
