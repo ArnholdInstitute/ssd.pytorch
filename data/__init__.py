@@ -18,4 +18,10 @@ class BaseTransform:
         self.mean = np.array(mean, dtype=np.float32)
 
     def __call__(self, image, boxes=None, labels=None):
-        return base_transform(image, self.size, self.mean), boxes, labels
+        new_img = base_transform(image, self.size, self.mean)
+        if boxes is not None:
+            boxes = boxes.astype('float32')
+            boxes[:, (0, 2)] /= image.shape[1]
+            boxes[:, (1, 3)] /= image.shape[0]
+
+        return new_img, boxes, labels
