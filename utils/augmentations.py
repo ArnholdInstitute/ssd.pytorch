@@ -419,37 +419,40 @@ class PhotometricDistort(object):
 
 def CropAndScale(image, boxes, labels):
     h, w, c = image.shape
-    x_crop = random.randint(1, 50)
-    y_crop = random.randint(1, 50)
+    crop = 75 # random.randint(1, 50)
     orig_boxes = boxes.copy()
 
-    if random.randint(2) == 0:
-        cropped = image[x_crop:, y_crop:, :]
-        boxes[:, (0, 2)] -= y_crop
-        boxes[:, (1, 3)] -= x_crop
+    if False and random.randint(2) == 0:
+        # crop out upper left corner
+        cropped = image[crop:, crop:, :]
+        boxes -= crop
     else:
-        cropped = image[:-x_crop, :-y_crop, :]
+        # Crop out lower right corner
+        cropped = image[:-crop, :-crop, :]
 
-    boxes[:, (0, 2)] = np.clip(boxes[:, (0, 2)], a_min = 0, a_max = w - y_crop)
-    boxes[:, (1, 3)] = np.clip(boxes[:, (1, 3)], a_min = 0, a_max = h - x_crop)
+    if len(boxes) > 0:
+        # Clip boxes to cropped dimensions
+        boxes[:, (0, 2)] = np.clip(boxes[:, (0, 2)], a_min = 0, a_max = w - crop)
+        boxes[:, (1, 3)] = np.clip(boxes[:, (1, 3)], a_min = 0, a_max = h - crop)
 
-    mask = (boxes[:, 2] - boxes[:, 0] > 3) & (boxes[:, 3] - boxes[:, 1] > 3)
-    boxes = boxes[mask, :]
-    labels = labels[mask]
+        mask = (boxes[:, 2] - boxes[:, 0] > 3) & (boxes[:, 3] - boxes[:, 1] > 3)
+        boxes = boxes[mask, :]
+        labels = labels[mask]
+        boxes[:, (0, 2)] = boxes[:, (0, 2)] / (w - crop) * w
+        boxes[:, (1, 3)] = boxes[:, (1, 3)] / (h - crop) * h
 
-    cropped = cv2.resize(cropped, (h, w))
+    cropped = cv2.resize(cropped, (w, h))
 
-    boxes[:, (0, 2)] = boxes[:, (0, 2)] / (w - y_crop) * w
-    boxes[:, (1, 3)] = boxes[:, (1, 3)] / (h - x_crop) * h
+    printer(cropped, boxes)
 
     return cropped, boxes, labels
 
 def PerspectiveTransform(image, boxes, labels):
     src = np.array([
         list(random.randint(0, 50, 2)),
-        [random.randint(250, 300), random.randint(50)],
-        list(random.randint(250, 300, 2)),
-        [random.randint(50), random.randint(250, 300)]
+        [random.randint(image.shape[1] - 50, image.shape[1]), random.randint(50)],
+        [random.randint(image.shape[1]-50, image.shape[1]), random.randint(image.shape[0]-50, image.shape[0])],
+        [random.randint(50), random.randint(image.shape[0]-50, image.shape[0])]
     ], dtype = 'float32')
     dst = np.array([
         [0, 0],
@@ -458,25 +461,34 @@ def PerspectiveTransform(image, boxes, labels):
         [0, image.shape[0] - 1]
     ], dtype = 'float32')
 
+    h, w, c = image.shape
+
     M = cv2.getPerspectiveTransform(src, dst)
-    warped = cv2.warpPerspective(image, M, image.shape[:2])
+    warped = cv2.warpPerspective(image, M, (w, h))
 
-    temp = boxes.copy()
-    temp[:, :2] = cv2.perspectiveTransform(np.expand_dims(boxes[:, :2], 0), M)
-    temp[:, 2:] = cv2.perspectiveTransform(np.expand_dims(boxes[:, 2:], 0), M)
+    if len(boxes) > 0:
+        temp = boxes.copy()
+        temp[:, :2] = cv2.perspectiveTransform(np.expand_dims(boxes[:, :2], 0), M)
+        temp[:, 2:] = cv2.perspectiveTransform(np.expand_dims(boxes[:, 2:], 0), M)
 
-    warped_boxes = temp.copy()
+        warped_boxes = temp.copy()
 
-    warped_boxes[:, 0] = temp[:, (0, 2)].min(axis=1)
-    warped_boxes[:, 1] = temp[:, (1, 3)].min(axis=1)
-    warped_boxes[:, 2] = temp[:, (0, 2)].max(axis=1)
-    warped_boxes[:, 3] = temp[:, (1, 3)].max(axis=1)
+        warped_boxes[:, 0] = temp[:, (0, 2)].min(axis=1)
+        warped_boxes[:, 1] = temp[:, (1, 3)].min(axis=1)
+        warped_boxes[:, 2] = temp[:, (0, 2)].max(axis=1)
+        warped_boxes[:, 3] = temp[:, (1, 3)].max(axis=1)
 
-    warped_boxes = np.clip(warped_boxes, a_min=0, a_max=300)
-    mask = (warped_boxes[:, 2] - warped_boxes[:, 0] > 3) & (warped_boxes[:, 3] - warped_boxes[:, 1] > 3)
-    warped_boxes = warped_boxes[mask]
+        warped_boxes[:, (0, 2)] = np.clip(warped_boxes[:, (0, 2)], a_min=0, a_max=image.shape[1])
+        warped_boxes[:, (1, 3)] = np.clip(warped_boxes[:, (1, 3)], a_min=0, a_max=image.shape[0])
+        mask = (warped_boxes[:, 2] - warped_boxes[:, 0] > 3) & (warped_boxes[:, 3] - warped_boxes[:, 1] > 3)
+        warped_boxes = warped_boxes[mask]
+        labels = labels[mask]
+    else:
+        warped_boxes = boxes
 
-    return warped, warped_boxes, labels[mask]
+    printer(warped, warped_boxes)
+
+    return warped, warped_boxes, labels
 
 def Warp(image, boxes, labels):
     rint = random.randint(0, 2)
