@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-import os, torch, json, time, pdb, numpy as np
+import os, torch, json, time, pdb, numpy as np, cv2
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -9,12 +9,13 @@ import torch.nn.init as init
 import argparse
 from torch.autograd import Variable
 import torch.utils.data as data
-from data import v2, v1, detection_collate
+from data import v2, v1, detection_collate, BaseTransform
 from utils.augmentations import SSDAugmentation
 from layers.modules import MultiBoxLoss
 from ssd import build_ssd
 from Dataset import Dataset
 from datetime import datetime
+from torch.utils.data import DataLoader
 
 def str2bool(v):
     return v.lower() in ("yes", "true", "t", "1")
@@ -63,7 +64,7 @@ stepvalues = (50000, 100000, 120000)
 gamma = 0.1
 momentum = 0.9
 
-net = build_ssd('train', 300, num_classes).cuda()
+net = build_ssd('train', 300, num_classes, batch_norm = False).cuda()
 cudnn.benchmark = True
 
 def xavier(param):
@@ -74,17 +75,20 @@ def weights_init(m):
         xavier(m.weight.data)
         m.bias.data.zero_()
 
+checkpoint = None
 if args.resume:
     checkpoint = torch.load(args.resume)
     print('Resuming training, loading {}...'.format(args.resume))
     net.load_state_dict(checkpoint['state_dict'])
     optimizer = checkpoint['optimizer']
     args.start_iter = checkpoint['epoch']
+    TIMESTAMP = checkpoint['timestamp'] if 'timestamp' in checkpoint else TIMESTAMP
 else:
     vgg_weights = torch.load(args.save_folder + args.basenet)
     print('Loading base network...')
     net.vgg.load_state_dict(vgg_weights)
-    optimizer = optim.SGD(net.parameters(), lr=args.lr,
+    tuneable = filter(lambda p: p.requires_grad, net.parameters())
+    optimizer = optim.SGD(tuneable, lr=args.lr,
                       momentum=args.momentum, weight_decay=args.weight_decay)
     print('Initializing weights...')
     # initialize newly added layers' weights with xavier method
@@ -92,19 +96,29 @@ else:
     net.loc.apply(weights_init)
     net.conf.apply(weights_init)
 
-def checkpoint(net, optim, checkpoint_name, epoch):
+def mk_checkpoint(net, optim, checkpoint_name, epoch, best_loss):
     state_dict = net.state_dict()
     for key in state_dict.keys():                                                                                                                                                                                
         state_dict[key] = state_dict[key].cpu()                                                                                                                                                                                         
     torch.save({                                                                                                                                                                                                 
         'epoch': epoch,                                                                                                                                                                                     
-        'state_dict': state_dict,                                                                                                                                                                                
+        'state_dict': state_dict,
+        'best_loss' : best_loss,
+        'timestamp' : TIMESTAMP,                                                                                                                                                                            
         'optimizer': optim},                                                                                                                                                                                     
         checkpoint_name)
 
-criterion = MultiBoxLoss(num_classes, 0.5, True, 0, True, 3, 0.5, False, args.cuda)
+POS_NEG_RATIO = 3
+criterion = MultiBoxLoss(num_classes, 0.5, True, 0, True, POS_NEG_RATIO, 0.5, False, args.cuda)
+
+def check_gradients(net):
+    for name, p in net.named_parameters():
+        print('%s: min: %f, max: %f, median: %f, mean: %f, std: %f' % 
+                (name, p.grad.min().data[0], p.grad.max().data[0], p.grad.median().data[0], 
+                    p.grad.mean().data[0], p.grad.std().data[0]))
 
 def train():
+    best_loss = checkpoint['best_loss'] if checkpoint and 'best_loss' in checkpoint else float('inf')
     net.train()
     # loss counters
     loc_loss = 0  # epoch
@@ -112,17 +126,23 @@ def train():
     epoch = 0
     print('Loading Dataset...')
 
-    train_data = json.load(open('../data/train_data.json'))
+    train_data = json.load(open('../data/train_data.json')) + json.load(open('../data/rio_train.json'))
     dataset = Dataset('../data', train_data, transform=SSDAugmentation(ssd_dim, means)).even()
+
+    val_data = json.load(open('../data/val_data.json')) + json.load(open('../data/rio_val.json'))
+    val_dataset = Dataset('../data', val_data, transform=BaseTransform(300, (104, 117, 123)))
+    val_loader = DataLoader(val_dataset, batch_size = args.batch_size, collate_fn=detection_collate)
+
 
     epoch_size = len(dataset) // args.batch_size
     step_index = 0
     batch_iterator = None
-    data_loader = data.DataLoader(dataset, batch_size, num_workers=args.num_workers,
+    data_loader = data.DataLoader(dataset, batch_size, #num_workers=args.num_workers,
                                   shuffle=True, collate_fn=detection_collate, pin_memory=True)
 
-    scheduler = ReduceLROnPlateau(optimizer, patience=500, min_lr=1e-6, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, min_lr=1e-8, verbose=True)
 
+    net.train()
     for iteration in range(args.start_iter, max_iter):
         if (not batch_iterator) or (iteration % epoch_size == 0):
             # create batch iterator
@@ -137,6 +157,17 @@ def train():
 
         # load train data
         images, targets = next(batch_iterator)
+
+        # img_data = images.numpy()
+        # for i, img in enumerate(img_data):
+        #     img = img.transpose((1,2,0))[:,:,(2,1,0)]
+        #     img = ((img - img.min()) / img.max() * 255).astype('uint8').copy()
+
+        #     for box in targets[i].numpy():
+        #         box = (box * 300).round().astype(int)
+        #         cv2.rectangle(img, tuple(box[:2]), tuple(box[2:4]), (0,0,255))
+
+        #     cv2.imwrite('samples/sample_%d.jpg' % i, img)
 
         if args.cuda:
             images = Variable(images.cuda())
@@ -154,21 +185,35 @@ def train():
         loss.backward()
         optimizer.step()
 
-
         t1 = time.time()
         loc_loss += loss_l.data[0]
         conf_loss += loss_c.data[0]
-        print('Timer: %.4f sec.' % (t1 - t0))
-        print('iter %d || Loss: %.4f' % (iteration, loss.data[0]))
+        print('Timer: %f sec || iter %d || Loss: %.4f, loss_l: %.4f, loss_c: %.4f' % 
+            ((t1 - t0), iteration, loss.data[0], loss_l.data[0], loss_c.data[0]))
 
-        scheduler.step(loss.data[0])
+        if iteration % 100 == 0 and iteration != args.start_iter:
+            # validate
+            test_loss = 0
+            N = len(val_loader)
+            net.eval()
+            for i, (inputs, targets) in enumerate(val_loader):
+                inputs = Variable(inputs.cuda(), volatile=True)
+                targets = [Variable(anno.cuda(), volatile=True) for anno in targets]
+                out = net(inputs)
+                loss_l, loss_c = criterion(out, targets)
+                loss = loss_l + loss_c
+                print('[%d/%d]: loss: %f, loss_l: %f, loss_c: %f' % (i, N, loss.data[0], loss_l.data[0], loss_c.data[0]))
 
-        if iteration % 1000 == 0 and iteration != args.start_iter:
-            print('Saving state, iter:', iteration)
-            checkpoint(net, optimizer, 'weights/ssd300_0712_' + TIMESTAMP + '.pth', iteration)
+                test_loss += loss_l.data[0] + loss_c.data[0]
 
-    checkpoint(net, optimizer, args.save_folder + '' + args.version + '.pth', iteration)
+            net.train()
+            scheduler.step(test_loss)
 
+            print('test_loss = %f, best_loss = %f' % (test_loss, best_loss))
+            if test_loss < best_loss:
+                print('Saving state, iter: %d, best_loss = %f' % (iteration, test_loss))
+                best_loss = test_loss
+                mk_checkpoint(net, optimizer, 'weights/ssd300_0712_' + TIMESTAMP + '.pth', iteration, test_loss)
 
 def adjust_learning_rate(optimizer, gamma, step):
     """Sets the learning rate to the initial LR decayed by 10 at every specified step

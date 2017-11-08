@@ -1,4 +1,4 @@
-import torch
+import torch, pdb
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
@@ -46,6 +46,7 @@ class SSD(nn.Module):
 
         # SSD network
         self.vgg = nn.ModuleList(base)
+        
         # Layer learns to scale the l2 normalized features from conv4_3
         self.L2Norm = L2Norm(512, 20)
         self.extras = nn.ModuleList(extras)
@@ -55,7 +56,7 @@ class SSD(nn.Module):
 
         if phase == 'test':
             self.softmax = nn.Softmax()
-            self.detect = Detect(num_classes, 0, 200, 0.01, 0.45)
+            self.detect = Detect(num_classes, 0, 200, 0.01, 0.35)#0.45)
 
     def forward(self, x):
         """Applies network layers and ops on input image(s) x.
@@ -153,40 +154,47 @@ def vgg(cfg, i, batch_norm=False):
                nn.ReLU(inplace=True), conv7, nn.ReLU(inplace=True)]
     return layers
 
+class MakeLayer:
+    def __init__(self, batch_norm = False):
+        self.batch_norm = batch_norm
 
-def add_extras(cfg, i, batch_norm=False):
+    def __call__(self, l):
+        if self.batch_norm:
+            layer = nn.Sequential(l, nn.BatchNorm2d(l.out_channels))
+            layer.out_channels = l.out_channels
+            return layer
+        else:
+            return l
+
+def add_extras(cfg, i, batch_norm):
     # Extra layers added to VGG for feature scaling
+    mk_layer = MakeLayer(batch_norm)
     layers = []
     in_channels = i
     flag = False
     for k, v in enumerate(cfg):
         if in_channels != 'S':
             if v == 'S':
-                layers += [nn.Conv2d(in_channels, cfg[k + 1],
-                           kernel_size=(1, 3)[flag], stride=2, padding=1)]
+                layers.append(mk_layer(nn.Conv2d(in_channels, cfg[k + 1], kernel_size=(1, 3)[flag], stride=2, padding=1)))
             else:
-                layers += [nn.Conv2d(in_channels, v, kernel_size=(1, 3)[flag])]
+                layers.append(mk_layer(nn.Conv2d(in_channels, v, kernel_size=(1, 3)[flag])))
             flag = not flag
         in_channels = v
     return layers
 
 
-def multibox(vgg, extra_layers, cfg, num_classes):
+def multibox(vgg, extra_layers, cfg, num_classes, batch_norm):
+    mk_layer = MakeLayer(batch_norm)
     loc_layers = []
     conf_layers = []
     vgg_source = [24, -2]
     for k, v in enumerate(vgg_source):
-        loc_layers += [nn.Conv2d(vgg[v].out_channels,
-                                 cfg[k] * 4, kernel_size=3, padding=1)]
-        conf_layers += [nn.Conv2d(vgg[v].out_channels,
-                        cfg[k] * num_classes, kernel_size=3, padding=1)]
+        loc_layers.append(mk_layer(nn.Conv2d(vgg[v].out_channels, cfg[k] * 4, kernel_size=3, padding=1)))
+        conf_layers.append(mk_layer(nn.Conv2d(vgg[v].out_channels,cfg[k] * num_classes, kernel_size=3, padding=1)))
     for k, v in enumerate(extra_layers[1::2], 2):
-        loc_layers += [nn.Conv2d(v.out_channels, cfg[k]
-                                 * 4, kernel_size=3, padding=1)]
-        conf_layers += [nn.Conv2d(v.out_channels, cfg[k]
-                                  * num_classes, kernel_size=3, padding=1)]
+        loc_layers.append(mk_layer(nn.Conv2d(v.out_channels, cfg[k] * 4, kernel_size=3, padding=1)))
+        conf_layers.append(mk_layer(nn.Conv2d(v.out_channels, cfg[k] * num_classes, kernel_size=3, padding=1)))
     return vgg, extra_layers, (loc_layers, conf_layers)
-
 
 base = {
     '300': [64, 64, 'M', 128, 128, 'M', 256, 256, 256, 'C', 512, 512, 512, 'M',
@@ -203,7 +211,7 @@ mbox = {
 }
 
 
-def build_ssd(phase, size=300, num_classes=21):
+def build_ssd(phase, size=300, num_classes=21, batch_norm = True):
     if phase != "test" and phase != "train":
         print("Error: Phase not recognized")
         return
@@ -211,6 +219,6 @@ def build_ssd(phase, size=300, num_classes=21):
         print("Error: Sorry only SSD300 is supported currently!")
         return
 
-    return SSD(phase, num_classes, *multibox(vgg(base[str(size)], 3),
-                                add_extras(extras[str(size)], 1024),
-                                mbox[str(size)], num_classes))
+    return SSD(phase, num_classes, *multibox(vgg(base[str(size)], 3, batch_norm=batch_norm),
+                                add_extras(extras[str(size)], 1024, batch_norm),
+                                mbox[str(size)], num_classes, batch_norm))
