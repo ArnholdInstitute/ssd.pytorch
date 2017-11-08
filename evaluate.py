@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 
-import os, pdb, argparse, json, torch, cv2, numpy as np, rtree, pandas
+import os, pdb, argparse, json, torch, cv2, numpy as np, rtree, pandas, glob
 from torch.autograd import Variable
-from tqdm import tqdm
 from shapely.geometry import MultiPolygon, box
 from ssd import build_ssd
 from data import BaseTransform
@@ -39,13 +38,14 @@ def get_metrics(gt_boxes, pred_boxes):
                 best_idx = gt_idx
             if intersection > best_overlap:
                 best_overlap = intersection
-        if best_idx is None or best_jaccard < 0.25:
+        if best_idx is None or best_jaccard <= 0.00000000000001:
             false_positives += 1
         else:
+            idx.delete(best_idx, gt_boxes[best_idx])
             true_positives += 1
         total_overlap = best_overlap
     total_jaccard = total_overlap / (gt_mp.area + pred_mp.area - total_overlap) if len(gt_boxes) > 0 else None
-    false_negatives = idx.count((0,0,500,500))
+    false_negatives = len(gt_boxes) - true_positives
     return false_positives, false_negatives, true_positives, total_jaccard
 
 def img_iter(test_set, data_dir):
@@ -74,12 +74,16 @@ def test_net(net, test_set, data_dir, batch_size = 16, thresh=0.5):
 
     false_positives, false_negatives, true_positives, num_samples = 0,0,0,0
 
-    for i in tqdm(range(0, len(test_set), batch_size)):
+    [os.remove(f) for f in glob.glob('samples/*.jpg')]
+
+    for batch_num in range(0, len(test_set), batch_size):
         inputs, originals, targets = zip(*[next(dataset) for _ in range(batch_size)])
         inputs = Variable(torch.stack(inputs, 0).cuda(), volatile=True)
 
         y = net(inputs)      # forward pass
         detections = y.data.cpu().numpy()
+
+        ridx = np.random.randint(len(detections))
 
         for i in range(len(detections)):
             dets = detections[i, 1]
@@ -102,11 +106,22 @@ def test_net(net, test_set, data_dir, batch_size = 16, thresh=0.5):
                 'true_positives' : tp,
                 'jaccard' : jaccard
             })
+            if tp < fp + fn:
+                orig = orig.copy()
+                actual = orig.copy()
+                for box in valid_dets[:, 1:].round().astype(int):
+                    cv2.rectangle(orig, tuple(box[:2]), tuple(box[2:]), (0,0,255))
+
+                for box in targets[i].astype(int):
+                    cv2.rectangle(actual, tuple(box[:2]), tuple(box[2:]), (255,0,0))
+
+                cv2.imwrite('samples/sample_%d.jpg' % (batch_num + i), np.concatenate([actual, orig], axis=1))
 
         print('False positivies: %d, False negatives: %d, True positivies: %d, Precision: %f, Recall: %f' % 
-            (false_positives, false_negatives, true_positives, float(true_positives)/num_samples, float(true_positives)/(num_samples + false_positives)))
+            (false_positives, false_negatives, true_positives, float(true_positives)/(true_positives + false_positives), float(true_positives)/(true_positives + false_negatives)))
 
     pandas.DataFrame(results).to_csv('results.csv', index=False)
+    return false_positives, false_negatives, true_positives, num_samples
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -119,11 +134,33 @@ if __name__ == '__main__':
     test_set = json.load(open(args.test_set))
     test_set = filter(lambda x: 'AOI' not in x['image_path'], test_set)
 
+    print('Testing on %d images' % len(test_set))
+
+    checkpoint = torch.load(args.weights)
+
+    print('Best loss was %f' % checkpoint['best_loss'])
+
     num_classes = 2 # +1 background
-    net = build_ssd('test', 300, num_classes) # initialize SSD
-    net.load_state_dict(torch.load(args.weights)['state_dict'])
+    net = build_ssd('test', 300, num_classes, batch_norm = False).cuda()
+
+    net.load_state_dict(checkpoint['state_dict'])
     net.eval()
-    net = net.cuda()
+
+    fp, fn, tp, N = test_net(net, test_set, data_dir, thresh=args.thresh)
+
+    precision = float(tp)/(tp + fp)
+    recall = float(tp) / (tp + fn)
+    stats = {
+        'false_negatives' : fn,
+        'false_positives' : fp,
+        'true_positives' : tp,
+        'num_samples' : N,
+        'precision' : precision,
+        'recall' : recall,
+        'thresh' : args.thresh
+    }
+    checkpoint['stats'] = stats
+
+    torch.save(checkpoint, args.weights)
 
 
-    test_net(net, test_set, data_dir, thresh=args.thresh)
