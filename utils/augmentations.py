@@ -443,8 +443,6 @@ def CropAndScale(image, boxes, labels):
 
     cropped = cv2.resize(cropped, (w, h))
 
-    printer(cropped, boxes)
-
     return cropped, boxes, labels
 
 def PerspectiveTransform(image, boxes, labels):
@@ -486,8 +484,6 @@ def PerspectiveTransform(image, boxes, labels):
     else:
         warped_boxes = boxes
 
-    printer(warped, warped_boxes)
-
     return warped, warped_boxes, labels
 
 def Warp(image, boxes, labels):
@@ -504,8 +500,7 @@ class SSDAugmentation(object):
         self.augment = Compose([
             ConvertFromInts(),
             Rotate(),
-            # ToAbsoluteCoords(),
-            # PhotometricDistort(),
+            PhotometricDistort(),
             RandomMirror(),
             Warp,
             ToPercentCoords(),
